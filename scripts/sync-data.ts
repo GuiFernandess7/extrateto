@@ -1,0 +1,506 @@
+/**
+ * Data Sync Script
+ *
+ * Fetches real data from DadosJusBr API and populates the local SQLite database.
+ *
+ * Usage:
+ *   npx tsx scripts/sync-data.ts                         # Sync latest available month
+ *   npx tsx scripts/sync-data.ts --year 2024 --month 1   # Sync specific month
+ *   npx tsx scripts/sync-data.ts --seed                  # Seed with mock data (dev only)
+ *   npx tsx scripts/sync-data.ts --force                 # Re-sync even if data exists
+ */
+
+import path from "path";
+import fs from "fs";
+import Database from "better-sqlite3";
+
+// Ensure data directory exists
+const dataDir = path.join(process.cwd(), "data");
+if (!fs.existsSync(dataDir)) {
+  fs.mkdirSync(dataDir, { recursive: true });
+}
+
+const DB_PATH = path.join(dataDir, "extrateto.db");
+const TETO = 46366.19;
+
+// Real DadosJusBr API endpoint (uiapi/v2/download returns CSV)
+const DADOSJUSBR_DOWNLOAD = "https://api.dadosjusbr.org/uiapi/v2/download";
+
+const sqlite = new Database(DB_PATH);
+sqlite.pragma("journal_mode = WAL");
+sqlite.pragma("foreign_keys = ON");
+
+// Create tables
+sqlite.exec(`
+  CREATE TABLE IF NOT EXISTS membros (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    nome TEXT NOT NULL,
+    cargo TEXT NOT NULL,
+    orgao TEXT NOT NULL,
+    estado TEXT NOT NULL,
+    remuneracao_base REAL NOT NULL,
+    verbas_indenizatorias REAL NOT NULL,
+    direitos_eventuais REAL NOT NULL,
+    direitos_pessoais REAL NOT NULL,
+    remuneracao_total REAL NOT NULL,
+    acima_teto REAL NOT NULL,
+    percentual_acima_teto REAL NOT NULL,
+    mes_referencia TEXT NOT NULL,
+    ano_referencia INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS historico_mensal (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    membro_id INTEGER NOT NULL REFERENCES membros(id),
+    mes TEXT NOT NULL,
+    remuneracao_base REAL NOT NULL,
+    remuneracao_total REAL NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS sync_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    orgao TEXT NOT NULL,
+    mes_referencia TEXT NOT NULL,
+    total_membros INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    error_message TEXT,
+    synced_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_membros_estado ON membros(estado);
+  CREATE INDEX IF NOT EXISTS idx_membros_orgao ON membros(orgao);
+  CREATE INDEX IF NOT EXISTS idx_membros_remuneracao ON membros(remuneracao_total DESC);
+  CREATE INDEX IF NOT EXISTS idx_membros_acima_teto ON membros(acima_teto DESC);
+  CREATE INDEX IF NOT EXISTS idx_membros_mes ON membros(mes_referencia);
+  CREATE INDEX IF NOT EXISTS idx_historico_membro ON historico_mensal(membro_id);
+`);
+
+const insertMembro = sqlite.prepare(`
+  INSERT INTO membros (nome, cargo, orgao, estado, remuneracao_base, verbas_indenizatorias,
+    direitos_eventuais, direitos_pessoais, remuneracao_total, acima_teto,
+    percentual_acima_teto, mes_referencia, ano_referencia)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`);
+
+const insertSyncLog = sqlite.prepare(`
+  INSERT INTO sync_log (orgao, mes_referencia, total_membros, status, error_message)
+  VALUES (?, ?, ?, ?, ?)
+`);
+
+// All organs available in DadosJusBr
+const ORGAOS = [
+  "tjac", "tjal", "tjam", "tjap", "tjba", "tjce", "tjdft", "tjes",
+  "tjgo", "tjma", "tjmg", "tjms", "tjmt", "tjpa", "tjpb", "tjpe",
+  "tjpi", "tjpr", "tjrj", "tjrn", "tjro", "tjrr", "tjrs", "tjsc",
+  "tjse", "tjsp", "tjto",
+  "mppb", "mpac", "mpal", "mpam", "mpap", "mpba", "mpce", "mpdf",
+  "mpes", "mpgo", "mpma", "mpmg", "mpms", "mpmt", "mppa", "mppe",
+  "mppi", "mppr", "mprj", "mprn", "mpro", "mprr", "mprs", "mpsc",
+  "mpse", "mpsp", "mpto",
+];
+
+// Maps organ API id to readable name
+function mapOrgaoId(id: string): string {
+  const prefix = id.substring(0, 2).toUpperCase();
+  const suffix = id.substring(2).toUpperCase();
+  if (prefix === "TJ") return suffix === "DFT" ? "TJ-DF" : `TJ-${suffix}`;
+  if (prefix === "MP") return id === "mpu" ? "MPU" : `MP-${suffix}`;
+  return id.toUpperCase();
+}
+
+// Maps organ API id to state abbreviation
+function mapEstado(orgaoId: string): string {
+  const suffix = orgaoId.substring(2).toUpperCase();
+  if (suffix === "DFT") return "DF";
+  if (orgaoId === "mpu") return "DF";
+  return suffix;
+}
+
+// Maps cargo string to our categories
+function mapCargo(role: string, orgaoId: string): string {
+  const r = role.toLowerCase();
+  if (r.includes("desembargador")) return "Desembargador(a)";
+  if (r.includes("juiz") || r.includes("juíz")) return "Juiz(a)";
+  if (r.includes("ministro")) return "Ministro(a)";
+  if (r.includes("promotor")) return "Promotor(a)";
+  if (r.includes("procurador")) return "Procurador(a)";
+  if (r.includes("defensor")) return "Defensor(a) Público(a)";
+  if (orgaoId.startsWith("mp")) return "Promotor(a)";
+  return "Juiz(a)";
+}
+
+// Parse value that can be in two formats:
+// 1. Brazilian format: "33.924,92" or "33924,92" → R$ 33,924.92
+// 2. Centavos integer: 3392492 (no comma, no dot) → R$ 33,924.92
+function parseValor(valor: string): number {
+  if (!valor) return 0;
+  const trimmed = valor.trim();
+  if (trimmed === "0" || trimmed === "") return 0;
+
+  // If contains comma → Brazilian format (comma = decimal separator)
+  if (trimmed.includes(",")) {
+    const cleaned = trimmed.replace(/\./g, "").replace(",", ".");
+    const num = parseFloat(cleaned);
+    return isNaN(num) ? 0 : num;
+  }
+
+  // If pure integer (no comma, no dot) → centavos, divide by 100
+  if (/^-?\d+$/.test(trimmed)) {
+    return parseInt(trimmed, 10) / 100;
+  }
+
+  // Fallback: try parsing as-is (e.g. "123.45" US format)
+  const num = parseFloat(trimmed);
+  return isNaN(num) ? 0 : num;
+}
+
+// Simple CSV parser that handles quoted fields with commas
+function parseCSV(csv: string): Record<string, string>[] {
+  const lines = csv.split("\n");
+  if (lines.length < 2) return [];
+
+  const headers = parseCSVLine(lines[0]);
+  const rows: Record<string, string>[] = [];
+
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+
+    const values = parseCSVLine(line);
+    const row: Record<string, string> = {};
+    for (let j = 0; j < headers.length; j++) {
+      row[headers[j]] = values[j] || "";
+    }
+    rows.push(row);
+  }
+
+  return rows;
+}
+
+function parseCSVLine(line: string): string[] {
+  const fields: string[] = [];
+  let current = "";
+  let inQuotes = false;
+
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"') {
+      if (inQuotes && line[i + 1] === '"') {
+        current += '"';
+        i++;
+      } else {
+        inQuotes = !inQuotes;
+      }
+    } else if (ch === "," && !inQuotes) {
+      fields.push(current);
+      current = "";
+    } else {
+      current += ch;
+    }
+  }
+  fields.push(current);
+  return fields;
+}
+
+interface MemberAgg {
+  nome: string;
+  cargo: string;
+  orgao: string;
+  estado: string;
+  remuneracaoBase: number;
+  verbasIndenizatorias: number;
+  direitosEventuais: number;
+  direitosPessoais: number;
+}
+
+/**
+ * Downloads CSV data from DadosJusBr for a specific organ and month.
+ * Returns aggregated member data.
+ */
+async function fetchOrgaoCSV(
+  orgaoId: string,
+  year: number,
+  month: number
+): Promise<MemberAgg[]> {
+  const url = `${DADOSJUSBR_DOWNLOAD}?anos=${year}&meses=${month}&orgaos=${orgaoId}`;
+
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status} for ${orgaoId}`);
+  }
+
+  const csv = await response.text();
+  if (!csv || csv.length < 50) {
+    throw new Error(`Empty response for ${orgaoId}`);
+  }
+
+  const rows = parseCSV(csv);
+  if (rows.length === 0) {
+    throw new Error(`No data rows for ${orgaoId}`);
+  }
+
+  // Aggregate by member name
+  const members = new Map<string, MemberAgg>();
+  const orgaoName = mapOrgaoId(orgaoId);
+  const estado = mapEstado(orgaoId);
+
+  for (const row of rows) {
+    const nome = row.nome?.trim();
+    if (!nome) continue;
+
+    const valor = parseValor(row.valor);
+    const categoria = row.categoria_contracheque?.toLowerCase();
+    const macro = row.desambiguacao_macro?.toLowerCase() || "";
+
+    if (!members.has(nome)) {
+      members.set(nome, {
+        nome,
+        cargo: mapCargo(row.cargo || "", orgaoId),
+        orgao: orgaoName,
+        estado,
+        remuneracaoBase: 0,
+        verbasIndenizatorias: 0,
+        direitosEventuais: 0,
+        direitosPessoais: 0,
+      });
+    }
+
+    const m = members.get(nome)!;
+
+    if (categoria === "base") {
+      m.remuneracaoBase += valor;
+    } else if (categoria === "outras") {
+      // Classify "outras" (benefits) into subcategories
+      if (
+        macro.includes("aux-") ||
+        macro.includes("alimentacao") ||
+        macro.includes("saude") ||
+        macro.includes("moradia") ||
+        macro.includes("transporte")
+      ) {
+        m.verbasIndenizatorias += valor;
+      } else if (
+        macro.includes("ferias") ||
+        macro.includes("natalina") ||
+        macro.includes("abono") ||
+        macro.includes("licenca") ||
+        macro.includes("diarias") ||
+        macro.includes("pecunia")
+      ) {
+        m.direitosEventuais += valor;
+      } else if (
+        macro.includes("tempo-de-servico") ||
+        macro.includes("gratificacao") ||
+        macro.includes("substituicao")
+      ) {
+        m.direitosPessoais += valor;
+      } else {
+        // Default: classify as verbas indenizatórias
+        m.verbasIndenizatorias += valor;
+      }
+    }
+    // Skip "descontos" — we work with gross values
+  }
+
+  return Array.from(members.values());
+}
+
+/**
+ * Syncs a single organ: fetches CSV, aggregates, inserts into DB.
+ */
+async function syncOrgao(
+  orgaoId: string,
+  year: number,
+  month: number
+): Promise<number> {
+  const mesRef = `${year}-${String(month).padStart(2, "0")}`;
+  const orgaoName = mapOrgaoId(orgaoId);
+
+  try {
+    console.log(`  Fetching ${orgaoId}...`);
+    const members = await fetchOrgaoCSV(orgaoId, year, month);
+
+    if (members.length === 0) {
+      console.log(`  - ${orgaoId}: no members`);
+      insertSyncLog.run(orgaoName, mesRef, 0, "empty", null);
+      return 0;
+    }
+
+    const insertMany = sqlite.transaction((data: MemberAgg[]) => {
+      for (const m of data) {
+        const total =
+          m.remuneracaoBase +
+          m.verbasIndenizatorias +
+          m.direitosEventuais +
+          m.direitosPessoais;
+        const acima = Math.max(0, total - TETO);
+        const percentual = acima > 0 ? (acima / TETO) * 100 : 0;
+
+        insertMembro.run(
+          m.nome,
+          m.cargo,
+          m.orgao,
+          m.estado,
+          m.remuneracaoBase,
+          m.verbasIndenizatorias,
+          m.direitosEventuais,
+          m.direitosPessoais,
+          total,
+          acima,
+          percentual,
+          mesRef,
+          year
+        );
+      }
+    });
+
+    insertMany(members);
+    insertSyncLog.run(orgaoName, mesRef, members.length, "success", null);
+    console.log(`  + ${orgaoId}: ${members.length} membros`);
+    return members.length;
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    console.log(`  x ${orgaoId}: ${msg}`);
+    insertSyncLog.run(orgaoName, mesRef, 0, "error", msg);
+    return 0;
+  }
+}
+
+async function seedWithMockData() {
+  console.log("Seeding database with mock data...");
+  const { mockMembers } = await import("../src/data/mock-data");
+
+  const insertMany = sqlite.transaction((members: typeof mockMembers) => {
+    for (const m of members) {
+      insertMembro.run(
+        m.nome,
+        m.cargo,
+        m.orgao,
+        m.estado,
+        m.remuneracaoBase,
+        m.verbasIndenizatorias,
+        m.direitosEventuais,
+        m.direitosPessoais,
+        m.remuneracaoTotal,
+        m.acimaTeto,
+        m.percentualAcimaTeto,
+        "2025-06",
+        2025
+      );
+    }
+  });
+
+  insertMany(mockMembers);
+  console.log(`Done: ${mockMembers.length} members seeded`);
+}
+
+async function syncAll(year: number, month: number, force: boolean) {
+  const mesRef = `${year}-${String(month).padStart(2, "0")}`;
+  console.log(`\nSyncing real data for ${mesRef} from DadosJusBr...\n`);
+
+  // Check if already synced
+  if (!force) {
+    const existing = sqlite
+      .prepare("SELECT COUNT(*) as count FROM membros WHERE mes_referencia = ?")
+      .get(mesRef) as { count: number };
+
+    if (existing.count > 0) {
+      console.log(
+        `Already have ${existing.count} records for ${mesRef}. Use --force to re-sync.\n`
+      );
+      return;
+    }
+  } else {
+    // Delete existing data for this month
+    sqlite
+      .prepare("DELETE FROM membros WHERE mes_referencia = ?")
+      .run(mesRef);
+    console.log(`Cleared existing data for ${mesRef}.\n`);
+  }
+
+  let total = 0;
+  let success = 0;
+  let errors = 0;
+  const concurrency = 3;
+
+  // Process in batches
+  for (let i = 0; i < ORGAOS.length; i += concurrency) {
+    const batch = ORGAOS.slice(i, i + concurrency);
+    const results = await Promise.allSettled(
+      batch.map((orgao) => syncOrgao(orgao, year, month))
+    );
+
+    for (const result of results) {
+      if (result.status === "fulfilled") {
+        total += result.value;
+        if (result.value > 0) success++;
+      } else {
+        errors++;
+      }
+    }
+
+    // Rate limit: 500ms between batches
+    if (i + concurrency < ORGAOS.length) {
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  }
+
+  console.log(`\n--- Sync Complete ---`);
+  console.log(`Total members: ${total.toLocaleString()}`);
+  console.log(`Successful organs: ${success}/${ORGAOS.length}`);
+  console.log(`Failed organs: ${errors}`);
+  console.log(`Month: ${mesRef}\n`);
+}
+
+// CLI
+async function main() {
+  const args = process.argv.slice(2);
+
+  if (args.includes("--seed")) {
+    await seedWithMockData();
+    return;
+  }
+
+  const force = args.includes("--force");
+
+  // --all: sync all months from Jan 2024 to current
+  if (args.includes("--all")) {
+    const startYear = 2024;
+    const startMonth = 1;
+    const now = new Date();
+    const endYear = now.getFullYear();
+    const endMonth = now.getMonth() + 1;
+
+    let y = startYear;
+    let m = startMonth;
+    while (y < endYear || (y === endYear && m <= endMonth)) {
+      await syncAll(y, m, force);
+      m++;
+      if (m > 12) { m = 1; y++; }
+    }
+    return;
+  }
+
+  const yearIdx = args.indexOf("--year");
+  const monthIdx = args.indexOf("--month");
+
+  const now = new Date();
+  // Default to 3 months ago (recent months often lack data)
+  const defaultDate = new Date(now.getFullYear(), now.getMonth() - 3, 1);
+  const defaultYear = defaultDate.getFullYear();
+  const defaultMonth = defaultDate.getMonth() + 1;
+
+  const year = yearIdx >= 0 ? parseInt(args[yearIdx + 1], 10) : defaultYear;
+  const month = monthIdx >= 0 ? parseInt(args[monthIdx + 1], 10) : defaultMonth;
+
+  if (isNaN(year) || year < 2018 || year > 2030) {
+    console.error(`Invalid year: ${args[yearIdx + 1]}. Must be between 2018 and 2030.`);
+    process.exit(1);
+  }
+  if (isNaN(month) || month < 1 || month > 12) {
+    console.error(`Invalid month: ${args[monthIdx + 1]}. Must be between 1 and 12.`);
+    process.exit(1);
+  }
+
+  await syncAll(year, month, force);
+}
+
+main().catch(console.error).finally(() => sqlite.close());

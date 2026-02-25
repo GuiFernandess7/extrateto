@@ -1,0 +1,236 @@
+"use client";
+
+import { useMemo } from "react";
+import { useParams } from "next/navigation";
+import Link from "next/link";
+import { ArrowLeft, Building2, Users, TrendingUp, BarChart3, Shield } from "lucide-react";
+import { ShareButtons } from "@/components/share-buttons";
+import {
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  ResponsiveContainer,
+  ReferenceLine,
+} from "recharts";
+import type { Member } from "@/data/mock-data";
+import { getStatsByOrgao } from "@/lib/aggregations";
+import { TETO_CONSTITUCIONAL } from "@/lib/constants";
+import { formatCurrency, formatCurrencyFull, formatNumber, formatPercent } from "@/lib/utils";
+import { SalaryComparison } from "@/components/salary-comparison";
+import { Footer } from "@/components/footer";
+
+export function OrgaoDetailClient({ members }: { members: Member[] }) {
+  const params = useParams();
+  const slug = decodeURIComponent(params.slug as string);
+
+  const orgaoStats = useMemo(() => {
+    const allStats = getStatsByOrgao(members);
+    return allStats.get(slug);
+  }, [members, slug]);
+
+  if (!orgaoStats) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-background">
+        <div className="text-center">
+          <h1 className="font-serif text-2xl font-bold text-navy">
+            Órgão não encontrado
+          </h1>
+          <Link href="/orgao" className="mt-4 inline-block text-sm text-gray-500 hover:text-navy">
+            Ver todos os órgãos
+          </Link>
+        </div>
+      </div>
+    );
+  }
+
+  const topMembers = orgaoStats.membros.slice(0, 10);
+  const chartData = orgaoStats.membros.slice(0, 15).map((m) => ({
+    nome: m.nome.split(" ").slice(0, 2).join(" "),
+    total: m.remuneracaoTotal,
+    base: m.remuneracaoBase,
+    extras: m.remuneracaoTotal - m.remuneracaoBase,
+  }));
+
+  const scoreColor =
+    orgaoStats.transparenciaScore >= 80
+      ? "text-green-600"
+      : orgaoStats.transparenciaScore >= 60
+      ? "text-amber-600"
+      : "text-red-600";
+
+  return (
+    <div className="min-h-screen bg-background">
+      <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
+        <Link
+          href="/orgao"
+          className="mb-6 inline-flex items-center gap-1.5 text-sm text-gray-500 hover:text-navy"
+        >
+          <ArrowLeft className="h-4 w-4" />
+          Todos os órgãos
+        </Link>
+
+        <div className="mb-6 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <Building2 className="h-7 w-7 text-navy" />
+            <div>
+              <h1 className="font-serif text-2xl font-bold text-navy sm:text-3xl">
+                {orgaoStats.orgao}
+              </h1>
+              <p className="text-sm text-gray-500">{orgaoStats.estado}</p>
+            </div>
+          </div>
+          <ShareButtons
+            title={`ExtraTeto — ${orgaoStats.orgao}`}
+            text={`${orgaoStats.orgao}: ${orgaoStats.membrosAcimaTeto} membros acima do teto constitucional`}
+          />
+        </div>
+
+        <div className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+          <div className="rounded-lg border border-gray-100 bg-white p-4 shadow-sm">
+            <div className="mb-1 flex items-center gap-1.5">
+              <Users className="h-4 w-4 text-blue-500" />
+              <span className="text-[11px] text-gray-400">Total Membros</span>
+            </div>
+            <p className="text-xl font-bold text-navy">
+              {formatNumber(orgaoStats.totalMembros)}
+            </p>
+          </div>
+          <div className="rounded-lg border border-gray-100 bg-white p-4 shadow-sm">
+            <div className="mb-1 flex items-center gap-1.5">
+              <TrendingUp className="h-4 w-4 text-red-500" />
+              <span className="text-[11px] text-gray-400">Acima do Teto</span>
+            </div>
+            <p className="text-xl font-bold text-red-primary">
+              {formatNumber(orgaoStats.membrosAcimaTeto)}
+            </p>
+            <p className="text-[11px] text-gray-400">
+              {formatPercent(orgaoStats.percentualAcimaTeto)}
+            </p>
+          </div>
+          <div className="rounded-lg border border-gray-100 bg-white p-4 shadow-sm">
+            <div className="mb-1 flex items-center gap-1.5">
+              <BarChart3 className="h-4 w-4 text-amber" />
+              <span className="text-[11px] text-gray-400">Total Acima/mês</span>
+            </div>
+            <p className="text-xl font-bold text-red-primary">
+              {formatCurrency(orgaoStats.totalAcimaTeto)}
+            </p>
+          </div>
+          <div className="rounded-lg border border-gray-100 bg-white p-4 shadow-sm">
+            <div className="mb-1 flex items-center gap-1.5">
+              <BarChart3 className="h-4 w-4 text-navy" />
+              <span className="text-[11px] text-gray-400">Média Acima</span>
+            </div>
+            <p className="text-xl font-bold text-navy">
+              {formatCurrency(orgaoStats.mediaAcimaTeto)}
+            </p>
+          </div>
+          <div className="rounded-lg border border-gray-100 bg-white p-4 shadow-sm">
+            <div className="mb-1 flex items-center gap-1.5">
+              <Shield className="h-4 w-4 text-green-600" />
+              <span className="text-[11px] text-gray-400">Transparência</span>
+            </div>
+            <p className={`text-xl font-bold ${scoreColor}`}>
+              {orgaoStats.transparenciaScore}/100
+            </p>
+          </div>
+        </div>
+
+        <div className="grid gap-6 lg:grid-cols-2">
+          <div className="rounded-lg border border-gray-100 bg-white p-4 shadow-sm">
+            <h2 className="mb-3 font-serif text-base font-bold text-navy">
+              Top 15 Remunerações
+            </h2>
+            <div className="h-80">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={chartData} layout="vertical" margin={{ left: 10, right: 10 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+                  <XAxis
+                    type="number"
+                    tick={{ fontSize: 10, fill: "#94A3B8" }}
+                    tickFormatter={(v) => `${(v / 1000).toFixed(0)}k`}
+                  />
+                  <YAxis
+                    type="category"
+                    dataKey="nome"
+                    tick={{ fontSize: 10, fill: "#94A3B8" }}
+                    width={90}
+                  />
+                  <Tooltip
+                    formatter={(value) => formatCurrency(Number(value))}
+                    contentStyle={{ fontSize: 12 }}
+                  />
+                  <ReferenceLine
+                    x={TETO_CONSTITUCIONAL}
+                    stroke="#DC2626"
+                    strokeDasharray="6 3"
+                    strokeWidth={1.5}
+                  />
+                  <Bar dataKey="base" stackId="a" fill="#3B82F6" name="Base" />
+                  <Bar dataKey="extras" stackId="a" fill="#DC2626" name="Extras" radius={[0, 4, 4, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+
+          <SalaryComparison
+            remuneracao={orgaoStats.maiorRemuneracao}
+            nome={`membro mais bem pago do ${orgaoStats.orgao}`}
+          />
+        </div>
+
+        <div className="mt-6 rounded-lg border border-gray-100 bg-white p-4 shadow-sm">
+          <div className="mb-3 flex items-center justify-between">
+            <h2 className="font-serif text-base font-bold text-navy">
+              Membros do {orgaoStats.orgao}
+            </h2>
+            <Link
+              href={`/?orgao=${encodeURIComponent(orgaoStats.orgao)}`}
+              className="text-xs font-medium text-navy hover:underline"
+            >
+              Ver no ranking completo
+            </Link>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-gray-200 text-left text-[11px] uppercase tracking-wider text-gray-400">
+                  <th className="pb-2 pr-4">#</th>
+                  <th className="pb-2 pr-4">Nome</th>
+                  <th className="pb-2 pr-4">Cargo</th>
+                  <th className="pb-2 pr-4 text-right">Base</th>
+                  <th className="pb-2 pr-4 text-right">Total</th>
+                  <th className="pb-2 text-right">Acima do Teto</th>
+                </tr>
+              </thead>
+              <tbody>
+                {topMembers.map((m, i) => (
+                  <tr key={m.id} className="border-b border-gray-50">
+                    <td className="py-2 pr-4 text-xs text-gray-400">{i + 1}</td>
+                    <td className="py-2 pr-4 font-medium text-navy">{m.nome}</td>
+                    <td className="py-2 pr-4 text-xs text-gray-500">{m.cargo}</td>
+                    <td className="py-2 pr-4 text-right text-xs">
+                      {formatCurrencyFull(m.remuneracaoBase)}
+                    </td>
+                    <td className="py-2 pr-4 text-right text-xs font-semibold text-navy">
+                      {formatCurrencyFull(m.remuneracaoTotal)}
+                    </td>
+                    <td className="py-2 text-right text-xs font-semibold text-red-primary">
+                      {m.acimaTeto > 0
+                        ? `+${formatCurrencyFull(m.acimaTeto)}`
+                        : "—"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      <Footer />
+    </div>
+  );
+}
