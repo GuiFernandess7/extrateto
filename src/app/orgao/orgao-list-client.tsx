@@ -3,7 +3,7 @@
 import { useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { ArrowLeft, Building2, ChevronRight, Search } from "lucide-react";
+import { ArrowLeft, Building2, ChevronRight, Search, Info } from "lucide-react";
 import type { Member } from "@/data/mock-data";
 import { getStatsByOrgao, type OrgaoStats } from "@/lib/aggregations";
 import { formatCurrency, formatNumber, formatPercent, removeAccents } from "@/lib/utils";
@@ -135,6 +135,16 @@ export function OrgaoListClient({ members, availableYears, currentYear }: OrgaoL
           <span><strong className="text-navy">{totals.orgaos}</strong> órgãos</span>
           <span><strong className="text-navy">{formatNumber(totals.membros)}</strong> membros</span>
           <span>Total acima do teto: <strong className="text-red-primary">{formatCurrency(totals.totalAcima)}</strong></span>
+        </div>
+
+        {/* Data notice */}
+        <div className="mb-5 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5">
+          <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-500" />
+          <p className="text-xs leading-relaxed text-amber-800">
+            Alguns órgãos podem não aparecer em determinados anos por falta de dados disponíveis
+            no <a href="https://dadosjusbr.org" target="_blank" rel="noopener noreferrer" className="font-medium underline hover:text-amber-900">DadosJusBr</a>,
+            fonte oficial utilizada pelo ExtraTeto.
+          </p>
         </div>
 
         {/* Filters */}

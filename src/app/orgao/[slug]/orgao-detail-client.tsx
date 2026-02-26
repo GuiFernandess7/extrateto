@@ -3,7 +3,7 @@
 import { useMemo } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
-import { ArrowLeft, Building2, Users, TrendingUp, BarChart3 } from "lucide-react";
+import { ArrowLeft, Building2, Users, TrendingUp, BarChart3, Info } from "lucide-react";
 import { ShareButtons } from "@/components/share-buttons";
 import {
   BarChart,
@@ -41,13 +41,35 @@ export function OrgaoDetailClient({ members, availableYears, currentYear }: Orga
   if (!orgaoStats) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-background">
-        <div className="text-center">
+        <div className="mx-auto max-w-md text-center">
+          <Info className="mx-auto mb-4 h-10 w-10 text-amber-500" />
           <h1 className="font-serif text-2xl font-bold text-navy">
-            Órgão não encontrado
+            Dados indisponíveis para {slug} em {currentYear}
           </h1>
-          <Link href="/orgao" className="mt-4 inline-block text-sm text-gray-500 hover:text-navy">
-            Ver todos os órgãos
-          </Link>
+          <p className="mt-3 text-sm text-gray-500">
+            O <a href="https://dadosjusbr.org" target="_blank" rel="noopener noreferrer" className="font-medium text-navy underline hover:text-red-primary">DadosJusBr</a> não
+            possui dados deste órgão para o ano selecionado. Tente outro ano ou volte à lista de órgãos.
+          </p>
+          <div className="mt-5 flex items-center justify-center gap-3">
+            <Link
+              href={`/orgao?ano=${currentYear}`}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-navy shadow-sm hover:bg-surface"
+            >
+              <ArrowLeft className="h-4 w-4" />
+              Todos os órgãos
+            </Link>
+            {availableYears.length > 1 && (
+              <select
+                value={currentYear}
+                onChange={(e) => router.push(`/orgao/${encodeURIComponent(slug)}?ano=${e.target.value}`)}
+                className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-navy shadow-sm focus:border-navy focus:outline-none focus:ring-1 focus:ring-navy"
+              >
+                {availableYears.map((y) => (
+                  <option key={y.value} value={y.value}>{y.label}</option>
+                ))}
+              </select>
+            )}
+          </div>
         </div>
       </div>
     );
