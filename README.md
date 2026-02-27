@@ -12,7 +12,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Dashboard público que expõe remunerações acima do teto constitucional no sistema de Justiça brasileiro.
-Dados reais. Transparência cidadã. Sem filtro.
+Dados reais. Transparência cidadã. Sem filtro. #
 
 <!--
   SCREENSHOT / DEMO
